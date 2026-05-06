@@ -34,6 +34,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from fftransformer.fftransformer_residual import FFTransformerResidual  # noqa: E402
 from fftransformer.helpers import get_nash_welfare  # noqa: E402
+from training.losses import sample_repair_best_nll_loss  # noqa: E402
 
 try:
     import wandb
@@ -94,6 +95,10 @@ def parse_args():
     # Training settings
     parser.add_argument("--grad-clip-norm", type=float, default=1.0, help="Gradient clipping")
     parser.add_argument("--seed", type=int, default=0, help="Random seed")
+    parser.add_argument("--num-samples", type=int, default=8,
+                       help="Number of sampled candidate allocations per valuation matrix")
+    parser.add_argument("--ef1-repair-passes", type=int, default=10,
+                       help="Maximum EF1 repair passes per sampled allocation")
 
     # Checkpointing
     parser.add_argument("--checkpoint-dir", type=str, default="checkpoints/variable_size",
@@ -332,10 +337,12 @@ def train(config: Dict[str, Any]):
 
         # Forward pass
         allocation = model(valuations)
-        nash_welfare = get_nash_welfare(
-            valuations, allocation, reduction="mean"
+        loss, loss_metrics = sample_repair_best_nll_loss(
+            valuations,
+            allocation,
+            num_samples=config.get('num_samples', 8),
+            ef1_repair_passes=config.get('ef1_repair_passes', 10),
         )
-        loss = -nash_welfare
 
         # Backward pass
         optimizer.zero_grad()
@@ -351,7 +358,9 @@ def train(config: Dict[str, Any]):
         metrics = {
             "step": step,
             "loss": loss.item(),
-            "nash_welfare": nash_welfare.item(),
+            "best_repaired_nash_welfare": loss_metrics["best_repaired_nash_welfare"],
+            "mean_repaired_nash_welfare": loss_metrics["mean_repaired_nash_welfare"],
+            "soft_nash_welfare": loss_metrics["soft_nash_welfare"],
             "train_n": n,
             "train_m": m,
             "lr": scheduler.get_last_lr()[0],
@@ -401,7 +410,9 @@ def train(config: Dict[str, Any]):
         # Log to console every 100 steps
         if step % 100 == 0:
             print(f"Step {step}/{config['steps']}: loss={loss.item():.6f}, "
-                  f"nw={nash_welfare.item():.6f} (n={n}, m={m}), "
+                  f"best_repaired_nw={loss_metrics['best_repaired_nash_welfare']:.6f}, "
+                  f"mean_repaired_nw={loss_metrics['mean_repaired_nash_welfare']:.6f}, "
+                  f"soft_nw={loss_metrics['soft_nash_welfare']:.6f} (n={n}, m={m}), "
                   f"residual_scale={model.residual_scale.item():.4f}, "
                   f"lr={scheduler.get_last_lr()[0]:.2e}")
 

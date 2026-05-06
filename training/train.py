@@ -31,6 +31,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from fftransformer.fftransformer import FFTransformer  # noqa: E402
 from fftransformer.helpers import get_nash_welfare  # noqa: E402
+from training.losses import sample_repair_best_nll_loss  # noqa: E402
 
 try:
     import wandb
@@ -70,6 +71,10 @@ def parse_args():
     # Training settings
     parser.add_argument("--grad-clip-norm", type=float, default=1.0, help="Gradient clipping")
     parser.add_argument("--seed", type=int, default=0, help="Random seed")
+    parser.add_argument("--num-samples", type=int, default=8,
+                       help="Number of sampled candidate allocations per valuation matrix")
+    parser.add_argument("--ef1-repair-passes", type=int, default=10,
+                       help="Maximum EF1 repair passes per sampled allocation")
 
     # Checkpointing
     parser.add_argument("--checkpoint-dir", type=str, default="checkpoints",
@@ -271,10 +276,12 @@ def train(config: Dict[str, Any]):
 
         # Forward pass
         allocation = model(valuations)
-        nash_welfare = get_nash_welfare(
-            valuations, allocation, reduction="mean"
+        loss, loss_metrics = sample_repair_best_nll_loss(
+            valuations,
+            allocation,
+            num_samples=config.get('num_samples', 8),
+            ef1_repair_passes=config.get('ef1_repair_passes', 10),
         )
-        loss = -nash_welfare
 
         # Backward pass
         optimizer.zero_grad()
@@ -290,7 +297,9 @@ def train(config: Dict[str, Any]):
         metrics = {
             "step": step,
             "loss": loss.item(),
-            "nash_welfare": nash_welfare.item(),
+            "best_repaired_nash_welfare": loss_metrics["best_repaired_nash_welfare"],
+            "mean_repaired_nash_welfare": loss_metrics["mean_repaired_nash_welfare"],
+            "soft_nash_welfare": loss_metrics["soft_nash_welfare"],
             "lr": scheduler.get_last_lr()[0],
             "temperature": current_temp.item(),
         }
@@ -335,7 +344,10 @@ def train(config: Dict[str, Any]):
         # Log to console every 100 steps
         if step % 100 == 0:
             print(f"Step {step}/{config['steps']}: loss={loss.item():.6f}, "
-                  f"nw={nash_welfare.item():.6f}, lr={scheduler.get_last_lr()[0]:.2e}")
+                  f"best_repaired_nw={loss_metrics['best_repaired_nash_welfare']:.6f}, "
+                  f"mean_repaired_nw={loss_metrics['mean_repaired_nash_welfare']:.6f}, "
+                  f"soft_nw={loss_metrics['soft_nash_welfare']:.6f}, "
+                  f"lr={scheduler.get_last_lr()[0]:.2e}")
 
         if use_wandb:
             wandb.log(metrics, step=step)
@@ -384,7 +396,9 @@ def main():
         # CLI args override file config
         for key, value in file_config.items():
             key_normalized = key.replace('-', '_')
-            if key_normalized not in config or config[key_normalized] is None:
+            if key_normalized in {"num_samples", "ef1_repair_passes"}:
+                config[key_normalized] = value
+            elif key_normalized not in config or config[key_normalized] is None:
                 config[key_normalized] = value
 
     train(config)
